@@ -1,0 +1,931 @@
+        [HttpPost]        
+        public ActionResult New(hr_staff_salary hr_staff_salary)
+        {
+            using (Model1 db = new Model1())
+            {
+                using (var transaction = db.Database.BeginTransaction())
+                {
+                    string message = string.Empty;
+                    //當下時間
+                    DateTime datenow = DateTime.Today;
+
+                    if (string.IsNullOrEmpty(hr_staff_salary.staff_code) && string.IsNullOrEmpty(hr_staff_salary.staff_name))    //無輸入員工
+                    {
+                        try
+                        {
+                            //  全部 薪資資料
+                            var hrSalary = db.hr_salary.ToList();
+                            //  查詢 薪資時間
+                            string SM = hr_staff_salary.search_datestart.ToString("yyyy-MM");
+                            //  空 薪資資料
+                            List<hr_salary> matchingSalary = new List<hr_salary>();
+
+                            if (!string.IsNullOrEmpty(hr_staff_salary.staff_code)
+                            && !string.IsNullOrEmpty(hr_staff_salary.staff_name))
+                            {
+                                matchingSalary = hrSalary.Where(salary =>
+                                    salary.staff_name == hr_staff_salary.staff_name &&
+                                    salary.staff_code == hr_staff_salary.staff_code &&
+                                    salary.salary_month == SM).ToList();
+                            }
+                            else if (!string.IsNullOrEmpty(hr_staff_salary.staff_code))
+                            {
+                                matchingSalary = hrSalary.Where(salary =>
+                                    salary.staff_code == hr_staff_salary.staff_code &&
+                                    salary.salary_month == SM).ToList();
+                            }
+                            else if (!string.IsNullOrEmpty(hr_staff_salary.staff_name))
+                            {
+                                matchingSalary = hrSalary.Where(salary =>
+                                    salary.staff_code == hr_staff_salary.staff_name &&
+                                    salary.salary_month == SM).ToList();
+                            }
+                            else
+                            {
+                                matchingSalary = hrSalary.Where(salary =>
+                                salary.salary_month == SM).ToList();
+                            }
+
+                            DateTime searchDateStart = hr_staff_salary.search_datestart;
+
+                            List<hr_staff> staffList = db.hr_staff
+                                //  到職日(契約開始日) && 契約結束日 要有值
+                                .Where(c => c.staff_contractstart.HasValue && c.staff_contractend.HasValue)
+                                .Where(c =>
+                                //  確保 staff_contractstart(到職日) 在 searchDateStart(薪資月份) 之前或同月
+                                //  並且 staff_contractend(契約結束日) 在 searchDateStart(薪資月份) 之後或同月
+                                    (c.staff_contractstart.Value.Year < searchDateStart.Year ||
+                                    (c.staff_contractstart.Value.Year == searchDateStart.Year && c.staff_contractstart.Value.Month <= searchDateStart.Month)) &&
+                                    (c.staff_contractend.Value.Year > searchDateStart.Year ||
+                                    (c.staff_contractend.Value.Year == searchDateStart.Year && c.staff_contractend.Value.Month >= searchDateStart.Month)))
+                                .ToList();
+
+                            //  這裡開始檢查程式碼
+
+                            for (int i = 0; i < staffList.Count; i++)
+                            {
+                                bool existsInList = staffList.Any(a => matchingSalary.Any(b => b.staff_code == a.staff_code));
+
+                                if (existsInList)
+                                {
+                                    message += $"{SM} {staffList[i].staff_name} ({staffList[i].staff_code})已經存在。";
+                                }
+                                else
+                                {
+                                    var staff = new hr_staff();
+
+                                    if (staffList[i].staff_code != null)
+                                    {
+                                        staff = staffList[i];
+                                    }
+
+                                    //  機器號1 出勤紀錄
+                                    var attDetin = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                                .Sum(v => v.in_time1);
+                                    var attDetout = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                            .Sum(v => v.out_time1);
+                                    //  機器號2 出勤紀錄
+                                    var bttDetin = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                            .Sum(v => v.in_time2);
+                                    var bttDetout = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                            .Sum(v => v.out_time2);
+                                    //  機器號3 出勤紀錄
+                                    var cttDetin = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                            .Sum(v => v.in_time3);
+                                    var cttDetout = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                            .Sum(v => v.out_time3);
+
+                                    //  例假日篩選
+                                    var norday = db.hr_holiday_list.Where(h => h.hl_type != "2").ToList();
+                                    var holiday = db.hr_holiday_list.Where(h => h.hl_type == "2" && h.hl_date == "日").ToList();
+                                    var otlate = db.v_hr_overtime_details.Where(v => v.staff_code == staff.staff_code).ToList();
+                                    var otnorday = otlate.Where(o => norday.Any(n => n.hl_name.Date == o.management_starttime.Date)).Sum(v => v.starttimediff); //平日加勤遲到
+                                    var otnordayleave = otlate.Where(o => norday.Any(n => n.hl_name.Date == o.management_starttime.Date)).Sum(v => v.endtimediff); //平日加勤早退
+                                    var otholiday = otlate.Where(o => holiday.Any(h => h.hl_name.Date == o.management_starttime.Date)).Sum(v => v.starttimediff); //假日加勤遲到
+                                    var otholidayleave = otlate.Where(o => holiday.Any(h => h.hl_name.Date == o.management_starttime.Date)).Sum(v => v.starttimediff); //假日加勤早退
+
+                                    int? late_nor_min = 0;
+                                    int? late_holiday_min = 0;
+
+                                    //auto have attandence
+                                    if (!staff.staff_attendautogen.HasValue)
+                                    {
+                                        //timeshot1
+                                        if (attDetin.HasValue && attDetout.HasValue)
+                                        {
+                                            int absAttDetin = Math.Abs(attDetin.Value);
+                                            int absAttDetout = Math.Abs(attDetout.Value);
+
+                                            if (absAttDetin > 0)
+                                            {
+                                                late_nor_min = absAttDetin;
+                                            }
+                                            if (absAttDetout > 0)
+                                            {
+                                                late_holiday_min = absAttDetout;
+                                            }
+                                        }
+                                        else if (bttDetin.HasValue && bttDetout.HasValue)
+                                        {
+                                            //timeshot2
+                                            int bbsAttDetin = Math.Abs(bttDetin.Value);
+                                            int bbsAttDetout = Math.Abs(bttDetout.Value);
+
+                                            if (bbsAttDetin > 0)
+                                            {
+                                                late_nor_min += bbsAttDetin;
+                                            }
+                                            if (bbsAttDetout > 0)
+                                            {
+                                                late_holiday_min += bbsAttDetout;
+                                            }
+                                        }
+                                        else if (cttDetin.HasValue && cttDetout.HasValue)
+                                        {
+                                            //timeshot3
+                                            int cbsAttDetin = Math.Abs(cttDetin.Value);
+                                            int cbsAttDetout = Math.Abs(cttDetout.Value);
+
+                                            if (cbsAttDetin > 0)
+                                            {
+                                                late_nor_min += cbsAttDetin;
+                                            }
+                                            if (cbsAttDetout > 0)
+                                            {
+                                                late_holiday_min += cbsAttDetout;
+                                            }
+                                        }
+                                    }
+                                    //  當前年分
+                                    int currentYear = datenow.Year;
+                                    int salary_amt = staff.staff_startsalary ?? 0;     //試用期薪水
+                                    int salary_lab = db.hr_insurance_labor_item.OrderBy(s => s.labor_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_pay).FirstOrDefault();    //  勞保
+
+                                    //  家眷
+                                    int familyCount = db.hr_staff_family.Where(f => f.staff_id == staff.staff_id).Count();
+                                    //  健保
+                                    int salary_hea = 0;
+
+                                    if (familyCount == 0)
+                                    {
+                                        salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_pay).FirstOrDefault();
+                                    }
+                                    else if (familyCount == 1)
+                                    {
+                                        salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_one_pay).FirstOrDefault();
+                                    }
+                                    else if (familyCount == 2)
+                                    {
+                                        salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_two_pay).FirstOrDefault();
+                                    }
+                                    else if (familyCount >= 3)
+                                    {
+                                        salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_three_pay).FirstOrDefault();
+                                    }
+                                    //  勞退
+                                    int salary_tir = 0;
+                                    if (staff.staff_labinsur == true)
+                                    {
+                                        salary_tir += salary_amt * (staff.staff_labinsurper ?? 0);
+                                    }
+                                    int salary_total = salary_amt - salary_lab - salary_hea - salary_tir;   //  薪資 - 勞保 - 健保 - 勞退
+
+                                    int salary_amt2 = staff.staff_basicsalary ?? 0;     //  正式薪水
+                                    int salary_lab2 = db.hr_insurance_labor_item.OrderBy(s => s.labor_year == currentYear && s.monthly_salary < salary_amt2).Select(s => s.ee_pay).FirstOrDefault();
+                                    int salary_hea2 = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt2).Select(s => s.ee_pay).FirstOrDefault();
+                                    int salary_tir2 = db.hr_insurance_pension_item.OrderBy(s => s.pension_year == currentYear && s.monthly_salary < salary_amt2).Select(s => s.ee_pay).FirstOrDefault();
+                                    int salary_total2 = salary_amt2 - salary_lab2 - salary_hea2 - salary_tir2;     //  薪資 - 勞保 - 健保 - 勞退
+
+                                    DateTime defaultDateTime = new DateTime(2100, 1, 1);
+                                    DateTime leavingDateYearMonth = staff.staff_trialend;
+                                    DateTime endDateYearMonth = staff.staff_contractend ?? defaultDateTime;
+                                    DateTime smDate = hr_staff_salary.search_datestart;
+
+                                    int smDateyear = smDate.Year;         //發薪日的年份
+                                    int endyear = smDate.Year;         //離職日的年份
+                                    int smDatemouth = smDate.Month;         //發薪日的月份
+                                    int endmounth = endDateYearMonth.Month;         //離職日的月份
+
+                                    //  查詢請假資料
+                                    //var leavedata = db.hr_takeleave
+                                    //                .Where(l => l.staff_code == staff.staff_code)
+                                    //                .ToList();
+                                    var leavedata = (from takeleave in db.hr_takeleave
+                                                     join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                     where takeleave.staff_code == staff.staff_code &&
+                                                     takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                     takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                     select takeleave).Count();
+                                    //  查詢 全部假 資料
+                                    var allleavedata = (from takeleave in db.hr_takeleave
+                                                        join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                        where takeleave.staff_code == staff.staff_code &&
+                                                        takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                        takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                        select takeleave).Count();
+
+                                    //  查詢 病假 資料
+                                    var sickleavedata = (from takeleave in db.hr_takeleave
+                                                         join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                         where takeleave.staff_code == staff.staff_code &&
+                                                         holiday_type.lt_code == "02" &&
+                                                         takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                         takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                         select takeleave).Count();
+                                    //  查詢事假資料
+                                    var personalleavedata = (from takeleave in db.hr_takeleave
+                                                             join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                             where takeleave.staff_code == staff.staff_code &&
+                                                             holiday_type.lt_code == "01" &&
+                                                             takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                             takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                             select takeleave).Count();
+                                    //  查詢事假資料
+                                    var otherleavedata = (from takeleave in db.hr_takeleave
+                                                          join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                          where takeleave.staff_code == staff.staff_code &&
+                                                          holiday_type.lt_code != "01" &&
+                                                          holiday_type.lt_code != "02" &&
+                                                          takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                          takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                          select takeleave).Count();
+
+                                    //  查詢例假資料 - 年度行事曆
+                                    var holidayDataCount = db.hr_holiday_list
+                                                            .Count(h => h.hl_type == "例假日");
+
+                                    var stfm = 30; // 一個月以30天計算
+                                    if (staff != null)
+                                    {
+                                        if (leavingDateYearMonth < smDate && smDatemouth == endmounth && smDateyear == endyear)    // 未到試用期 將離職
+                                        {
+                                            string leavingDateDay = endDateYearMonth.ToString("dd");
+                                            int leavingDay = int.Parse(leavingDateDay);
+                                            if (leavingDay > 30)
+                                            {
+                                                leavingDay = 30;
+                                            }
+                                            if (!string.IsNullOrEmpty(leavingDateDay) && leavingDay == 30)
+                                            {
+                                                var newHrSalary = new hr_salary
+                                                {
+                                                    total_salary = salary_amt,
+                                                    base_salary = salary_amt,
+                                                    dayofwork = leavingDay,
+                                                    labinsure_money = salary_lab,
+                                                    healthinsure_money = salary_hea,
+                                                    labretire_money = salary_tir,
+                                                    salary_month = SM,
+                                                    //pay_date = hr_staff_salary.search_datestart,//薪水發放日
+                                                    staff_id = staff.staff_id,
+                                                    staff_name = staff.staff_name,
+                                                    staff_code = staff.staff_code,
+                                                    //genleave = takeLeaveRecords,
+
+                                                    late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                                    early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                                    late_ot_min = otnorday ?? 0,
+                                                    early_lv_ot_min = otnordayleave ?? 0,
+                                                    late_holiday_min = otholiday ?? 0,
+                                                    early_lv_holiday_min = otholidayleave ?? 0,
+
+                                                    officialleave = holidayDataCount,
+                                                    personalleave = personalleavedata,
+                                                    sickleave = sickleavedata,
+                                                    genleave = allleavedata,
+                                                    otherleave = otherleavedata,
+
+                                                    liability_allowance = staff.staff_liability_allowance,
+                                                    efficiency_allowance = staff.staff_efficiency_allowance,
+                                                    job_allowance = staff.staff_job_allowance,
+                                                    sp_allowance = staff.staff_sp_allowance,
+                                                    skill_allowance = staff.staff_skill_allowance,
+                                                    other_allowance = staff.staff_other_allowance,
+                                                    guide_bonus = staff.staff_guide_bonus,
+                                                    work_bonus = staff.staff_work_bonus,
+
+                                                };
+                                                db.hr_salary.Add(newHrSalary);
+                                                message += $"{SM} {staffList[i].staff_name} ({staffList[i].staff_code})新增成功。";
+                                            }
+                                            else
+                                            {
+                                                var newHrSalary = new hr_salary
+                                                {
+                                                    total_salary = (salary_amt / stfm) * leavingDay,
+                                                    base_salary = salary_amt,
+                                                    dayofwork = leavingDay,
+                                                    labinsure_money = salary_lab,
+                                                    healthinsure_money = salary_hea,
+                                                    labretire_money = salary_tir,
+                                                    salary_month = SM,
+                                                    staff_id = staff.staff_id,
+                                                    staff_name = staff.staff_name,
+                                                    staff_code = staff.staff_code,
+
+                                                    late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                                    early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                                    late_ot_min = otnorday ?? 0,
+                                                    early_lv_ot_min = otnordayleave ?? 0,
+                                                    late_holiday_min = otholiday ?? 0,
+                                                    early_lv_holiday_min = otholidayleave ?? 0,
+
+                                                    officialleave = holidayDataCount,
+                                                    personalleave = personalleavedata,
+                                                    sickleave = sickleavedata,
+                                                    genleave = allleavedata,
+                                                    otherleave = otherleavedata,
+
+                                                    liability_allowance = staff.staff_liability_allowance,
+                                                    efficiency_allowance = staff.staff_efficiency_allowance,
+                                                    job_allowance = staff.staff_job_allowance,
+                                                    sp_allowance = staff.staff_sp_allowance,
+                                                    skill_allowance = staff.staff_skill_allowance,
+                                                    other_allowance = staff.staff_other_allowance,
+                                                    guide_bonus = staff.staff_guide_bonus,
+                                                    work_bonus = staff.staff_work_bonus,
+                                                };
+                                                db.hr_salary.Add(newHrSalary);
+                                                message += $"{SM} {staffList[i].staff_name} ({staffList[i].staff_code})新增成功。";
+
+                                            }
+                                        }
+                                        else if (leavingDateYearMonth > smDate && smDatemouth == endmounth && smDateyear == endyear)    // 過試用期 將離職
+                                        {
+                                            string leavingDateDay = endDateYearMonth.ToString("dd");
+                                            if (!string.IsNullOrEmpty(leavingDateDay))
+                                            {
+                                                int leavingDay = int.Parse(leavingDateDay);
+                                                var newHrSalary = new hr_salary
+                                                {
+                                                    total_salary = (salary_amt2 / stfm) * leavingDay,
+                                                    base_salary = salary_amt2,
+                                                    dayofwork = leavingDay,
+                                                    labinsure_money = salary_lab,
+                                                    healthinsure_money = salary_hea,
+                                                    labretire_money = salary_tir,
+                                                    salary_month = SM,
+                                                    staff_id = staff.staff_id,
+                                                    staff_name = staff.staff_name,
+                                                    staff_code = staff.staff_code,
+
+                                                    late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                                    early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                                    late_ot_min = otnorday ?? 0,
+                                                    early_lv_ot_min = otnordayleave ?? 0,
+                                                    late_holiday_min = otholiday ?? 0,
+                                                    early_lv_holiday_min = otholidayleave ?? 0,
+
+                                                    officialleave = holidayDataCount,
+                                                    personalleave = personalleavedata,
+                                                    sickleave = sickleavedata,
+                                                    genleave = allleavedata,
+                                                    otherleave = otherleavedata,
+
+                                                    liability_allowance = staff.staff_liability_allowance,
+                                                    efficiency_allowance = staff.staff_efficiency_allowance,
+                                                    job_allowance = staff.staff_job_allowance,
+                                                    sp_allowance = staff.staff_sp_allowance,
+                                                    skill_allowance = staff.staff_skill_allowance,
+                                                    other_allowance = staff.staff_other_allowance,
+                                                    guide_bonus = staff.staff_guide_bonus,
+                                                    work_bonus = staff.staff_work_bonus,
+                                                };
+                                                db.hr_salary.Add(newHrSalary);
+                                                message += $"{SM} {staffList[i].staff_name} ({staffList[i].staff_code})新增成功。";
+                                            }
+                                        }
+                                        else if (leavingDateYearMonth < smDate && smDate < endDateYearMonth) // 試用期到 未離職
+                                        {
+                                            var newHrSalary = new hr_salary
+                                            {
+                                                base_salary = salary_amt2,
+                                                labinsure_money = salary_lab2,
+                                                healthinsure_money = salary_hea2,
+                                                labretire_money = salary_tir2,
+                                                salary_month = SM,
+                                                staff_id = staff.staff_id,
+                                                staff_name = staff.staff_name,
+                                                staff_code = staff.staff_code,
+                                                total_salary = salary_total2,
+
+                                                late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                                early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                                late_ot_min = otnorday ?? 0,
+                                                early_lv_ot_min = otnordayleave ?? 0,
+                                                late_holiday_min = otholiday ?? 0,
+                                                early_lv_holiday_min = otholidayleave ?? 0,
+
+                                                officialleave = holidayDataCount,
+                                                personalleave = personalleavedata,
+                                                sickleave = sickleavedata,
+                                                genleave = allleavedata,
+                                                otherleave = otherleavedata,
+
+                                                liability_allowance = staff.staff_liability_allowance,
+                                                efficiency_allowance = staff.staff_efficiency_allowance,
+                                                job_allowance = staff.staff_job_allowance,
+                                                sp_allowance = staff.staff_sp_allowance,
+                                                skill_allowance = staff.staff_skill_allowance,
+                                                other_allowance = staff.staff_other_allowance,
+                                                guide_bonus = staff.staff_guide_bonus,
+                                                work_bonus = staff.staff_work_bonus,
+                                            };
+                                            db.hr_salary.Add(newHrSalary);
+                                            message += $"{SM} {staffList[i].staff_name} ({staffList[i].staff_code})新增成功。";
+                                        }
+                                        else if (leavingDateYearMonth > smDate && smDate < endDateYearMonth)    //未過試用期 未離職
+                                        {
+                                            var newHrSalary = new hr_salary
+                                            {
+                                                total_salary = salary_total,
+                                                base_salary = salary_amt,
+                                                labinsure_money = salary_lab,
+                                                healthinsure_money = salary_hea,
+                                                labretire_money = salary_tir,
+                                                salary_month = SM,
+                                                staff_id = staff.staff_id,
+                                                staff_name = staff.staff_name,
+                                                staff_code = staff.staff_code,
+
+                                                late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                                early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                                late_ot_min = otnorday ?? 0,
+                                                early_lv_ot_min = otnordayleave ?? 0,
+                                                late_holiday_min = otholiday ?? 0,
+                                                early_lv_holiday_min = otholidayleave ?? 0,
+
+                                                officialleave = holidayDataCount,
+                                                personalleave = personalleavedata,
+                                                sickleave = sickleavedata,
+                                                genleave = allleavedata,
+                                                otherleave = otherleavedata,
+
+                                                liability_allowance = staff.staff_liability_allowance,
+                                                efficiency_allowance = staff.staff_efficiency_allowance,
+                                                job_allowance = staff.staff_job_allowance,
+                                                sp_allowance = staff.staff_sp_allowance,
+                                                skill_allowance = staff.staff_skill_allowance,
+                                                other_allowance = staff.staff_other_allowance,
+                                                guide_bonus = staff.staff_guide_bonus,
+                                                work_bonus = staff.staff_work_bonus,
+                                            };
+                                            db.hr_salary.Add(newHrSalary);
+                                            message += $"{SM} {staffList[i].staff_name} ({staffList[i].staff_code})新增成功。";
+                                        }
+                                    }
+                                    db.SaveChanges();
+                                }
+                            }
+                            if (staffList.Count > 0)
+                            {
+                                transaction.Commit();
+                                TempData["SaveStatus"] = "success";
+                                TempData["SaveMessage"] = message;
+                            }
+                            else
+                            {
+                                TempData["SaveStatus"] = "success";
+                                TempData["SaveMessage"] = "沒有記錄可創建。";
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            transaction.Rollback();
+                            log.Error(ex.StackTrace);
+                            TempData["SaveStatus"] = "damger";
+                            TempData["SaveMessage"] = "新增失敗，發生錯誤。";
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            string SM = hr_staff_salary.search_datestart.ToString("yyyy-MM");
+
+                            hr_staff onlystaff = db.hr_staff.Where(s => s.staff_code == hr_staff_salary.staff_code && s.staff_name == hr_staff_salary.staff_name).FirstOrDefault();
+                            var staff = new hr_staff();
+
+                            //檢查是否有重複資料
+                            var samesalary = db.hr_salary.Where(s => s.staff_code == onlystaff.staff_code && s.salary_month == SM).FirstOrDefault();
+                            if (onlystaff != null)
+                            {
+                                staff = onlystaff;
+                            }
+                            if (samesalary == null)
+                            {
+                                //var takeLeaveRecords = db.hr_takeleave.Where(t => t.staff_code == staff.staff_code).Count();
+                                //機器號1 出勤紀錄
+                                var attDetin = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                        .Sum(v => v.in_time1);
+                                var attDetout = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                        .Sum(v => v.out_time1);
+                                //機器號2 出勤紀錄
+                                var bttDetin = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                        .Sum(v => v.in_time2);
+                                var bttDetout = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                        .Sum(v => v.out_time2);
+                                //機器號3 出勤紀錄
+                                var cttDetin = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                        .Sum(v => v.in_time3);
+                                var cttDetout = db.v_hr_attendance_details.Where(v => v.staff_code == staff.staff_code)
+                                                                        .Sum(v => v.out_time3);
+                                //例假日篩選
+                                var norday = db.hr_holiday_list.Where(h => h.hl_type != "2").ToList();
+                                var holiday = db.hr_holiday_list.Where(h => h.hl_type == "2" && h.hl_date == "日").ToList();
+                                var otlate = db.v_hr_overtime_details.Where(v => v.staff_code == staff.staff_code).ToList();
+                                var otnorday = otlate.Where(o => norday.Any(n => n.hl_name.Date == o.management_starttime.Date)).Sum(v => v.starttimediff); //平日加勤遲到
+                                var otnordayleave = otlate.Where(o => norday.Any(n => n.hl_name.Date == o.management_starttime.Date)).Sum(v => v.endtimediff); //平日加勤早退
+                                var otholiday = otlate.Where(o => holiday.Any(h => h.hl_name.Date == o.management_starttime.Date)).Sum(v => v.starttimediff); //假日加勤遲到
+                                var otholidayleave = otlate.Where(o => holiday.Any(h => h.hl_name.Date == o.management_starttime.Date)).Sum(v => v.starttimediff); //假日加勤早退
+
+
+                                int? late_nor_min = 0;
+                                int? late_holiday_min = 0;
+
+                                //  查詢請假資料
+                                //var leavedata = db.hr_takeleave
+                                //                .Where(l => l.staff_code == staff.staff_code)
+                                //                .ToList();
+                                var leavedata = (from takeleave in db.hr_takeleave
+                                                 join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                 where takeleave.staff_code == staff.staff_code &&
+                                                 takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                 takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                 select takeleave).Count();
+                                //  查詢 全部假 資料
+                                var allleavedata = (from takeleave in db.hr_takeleave
+                                                    join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                    where takeleave.staff_code == staff.staff_code &&
+                                                    takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                    takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                    select takeleave).Count();
+
+                                //  查詢 病假 資料
+                                var sickleavedata = (from takeleave in db.hr_takeleave
+                                                     join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                     where takeleave.staff_code == staff.staff_code &&
+                                                     holiday_type.lt_code == "02" &&
+                                                 takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                 takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                     select takeleave).Count();
+                                //  查詢事假資料
+                                var personalleavedata = (from takeleave in db.hr_takeleave
+                                                         join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                         where takeleave.staff_code == staff.staff_code &&
+                                                         holiday_type.lt_code == "01" &&
+                                                         takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                         takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                         select takeleave).Count();
+
+                                //  查詢事假資料
+                                var otherleavedata = (from takeleave in db.hr_takeleave
+                                                      join holiday_type in db.hr_holiday_type on takeleave.lt_name equals holiday_type.lt_name
+                                                      where takeleave.staff_code == staff.staff_code &&
+                                                      holiday_type.lt_code != "01" &&
+                                                      holiday_type.lt_code != "02" &&
+                                                      takeleave.takeleave_starttime.Year == hr_staff_salary.search_datestart.Year &&
+                                                      takeleave.takeleave_starttime.Month == hr_staff_salary.search_datestart.Month
+                                                      select takeleave).Count();
+
+                                //  查詢例假資料 - 年度行事曆
+                                var holidayDataCount = db.hr_holiday_list
+                                                        .Count(h => h.hl_type == "例假日");
+
+                                //auto have attandence
+                                if (!staff.staff_attendautogen.HasValue)
+                                {
+                                    //timeshot1
+                                    if (attDetin.HasValue && attDetout.HasValue)
+                                    {
+                                        int absAttDetin = Math.Abs(attDetin.Value);
+                                        int absAttDetout = Math.Abs(attDetout.Value);
+
+                                        if (absAttDetin > 0)
+                                        {
+                                            late_nor_min = absAttDetin;
+                                        }
+                                        if (absAttDetout > 0)
+                                        {
+                                            late_holiday_min = absAttDetout;
+                                        }
+                                    }
+                                    else if (bttDetin.HasValue && bttDetout.HasValue)
+                                    {
+                                        //timeshot2
+                                        int bbsAttDetin = Math.Abs(bttDetin.Value);
+                                        int bbsAttDetout = Math.Abs(bttDetout.Value);
+
+                                        if (bbsAttDetin > 0)
+                                        {
+                                            late_nor_min += bbsAttDetin;
+                                        }
+                                        if (bbsAttDetout > 0)
+                                        {
+                                            late_holiday_min += bbsAttDetout;
+                                        }
+                                    }
+                                    else if (cttDetin.HasValue && cttDetout.HasValue)
+                                    {
+                                        //timeshot3
+                                        int cbsAttDetin = Math.Abs(cttDetin.Value);
+                                        int cbsAttDetout = Math.Abs(cttDetout.Value);
+
+                                        if (cbsAttDetin > 0)
+                                        {
+                                            late_nor_min += cbsAttDetin;
+                                        }
+                                        if (cbsAttDetout > 0)
+                                        {
+                                            late_holiday_min += cbsAttDetout;
+                                        }
+                                    }
+                                }
+
+                                //  當前年分
+                                int currentYear = datenow.Year;
+                                int salary_amt = onlystaff.staff_startsalary ?? 0;     //試用期薪水
+                                                                                       //int salary_amt = 0;     //試用期薪水
+
+                                int salary_lab = db.hr_insurance_labor_item.OrderBy(s => s.labor_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_pay).FirstOrDefault();    //  勞保
+
+                                //  家眷
+                                int familyCount = db.hr_staff_family.Where(f => f.staff_id == onlystaff.staff_id).Count();
+                                //  健保
+                                int salary_hea = 0;
+                                if (familyCount == 0)
+                                {
+                                    salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_pay).FirstOrDefault();
+                                }
+                                else if (familyCount == 1)
+                                {
+                                    salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_one_pay).FirstOrDefault();
+                                }
+                                else if (familyCount == 2)
+                                {
+                                    salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_two_pay).FirstOrDefault();
+                                }
+                                else if (familyCount >= 3)
+                                {
+                                    salary_hea = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt).Select(s => s.ee_three_pay).FirstOrDefault();
+                                }
+                                //  勞退
+                                int salary_tir = 0;
+                                if (onlystaff.staff_labinsur == true)
+                                {
+                                    salary_tir += salary_amt * (onlystaff.staff_labinsurper ?? 0);
+                                }
+                                int salary_total = salary_amt - salary_lab - salary_hea - salary_tir;   //  薪資 - 勞保 - 健保 - 勞退
+
+                                int salary_amt2 = onlystaff.staff_basicsalary ?? 0;     //  正式薪水
+                                int salary_lab2 = db.hr_insurance_labor_item.OrderBy(s => s.labor_year == currentYear && s.monthly_salary < salary_amt2).Select(s => s.ee_pay).FirstOrDefault();
+                                int salary_hea2 = db.hr_insurance_health_item.OrderBy(s => s.health_year == currentYear && s.monthly_salary < salary_amt2).Select(s => s.ee_pay).FirstOrDefault();
+                                int salary_tir2 = db.hr_insurance_pension_item.OrderBy(s => s.pension_year == currentYear && s.monthly_salary < salary_amt2).Select(s => s.ee_pay).FirstOrDefault();
+                                int salary_total2 = salary_amt2 - salary_lab2 - salary_hea2 - salary_tir2;     //  薪資 - 勞保 - 健保 - 勞退
+
+                                DateTime defaultDateTime = new DateTime(2100, 1, 1);
+                                DateTime leavingDateYearMonth = onlystaff.staff_trialend;      //試用期結束
+                                DateTime endDateYearMonth = onlystaff.staff_contractend ?? defaultDateTime; // 離職時間，可能為 null
+                                DateTime smDate = hr_staff_salary.search_datestart;         //發薪日
+                                DateTime startdate = onlystaff.staff_contractstart.Value;         //入職日
+
+                                int smDateyear = smDate.Year;                 //發薪日的年份
+                                int? endyear = endDateYearMonth.Year;         //發薪日的年份
+                                int smDatemouth = smDate.Month;               //發薪日的月份
+                                int endmounth = endDateYearMonth.Month;       //發薪日的月份
+                                int startday = startdate.Day;
+
+                                var stfm = 30; // 一個月以30天計算
+
+                                if (leavingDateYearMonth < smDate && smDatemouth == endmounth && smDateyear == endyear)    // 未到試用期 當月離職
+                                {
+                                    string leavingDateDay = endDateYearMonth.ToString("dd");
+                                    if (!string.IsNullOrEmpty(leavingDateDay))
+                                    {
+                                        int leavingDay = int.Parse(leavingDateDay);
+                                        //rwfm = stfm - leavingDay;
+                                        var newHrSalary = new hr_salary
+                                        {
+                                            total_salary = (salary_amt / stfm) * leavingDay,
+                                            base_salary = salary_amt,
+                                            dayofwork = leavingDay,
+                                            labinsure_money = salary_lab,
+                                            healthinsure_money = salary_hea,
+                                            labretire_money = salary_tir,
+                                            salary_month = SM,
+                                            //pay_date = hr_staff_salary.search_datestart,//薪水發放日
+                                            staff_id = staff.staff_id,
+                                            staff_name = staff.staff_name,
+                                            staff_code = staff.staff_code,
+                                            //genleave = takeLeaveRecords,
+
+                                            late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                            early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                            late_ot_min = otnorday ?? 0,
+                                            early_lv_ot_min = otnordayleave ?? 0,
+                                            late_holiday_min = otholiday ?? 0,
+                                            early_lv_holiday_min = otholidayleave ?? 0,
+
+                                            officialleave = holidayDataCount,
+                                            personalleave = personalleavedata,
+                                            sickleave = sickleavedata,
+                                            genleave = allleavedata,
+                                            otherleave = otherleavedata,
+
+                                            liability_allowance = staff.staff_liability_allowance,
+                                            efficiency_allowance = staff.staff_efficiency_allowance,
+                                            job_allowance = staff.staff_job_allowance,
+                                            sp_allowance = staff.staff_sp_allowance,
+                                            skill_allowance = staff.staff_skill_allowance,
+                                            other_allowance = staff.staff_other_allowance,
+                                            guide_bonus = staff.staff_guide_bonus,
+                                            work_bonus = staff.staff_work_bonus,
+                                        };
+                                        db.hr_salary.Add(newHrSalary);
+                                        //message += string.Format("{0} {1} ({2})新增成功。<br />", SM, staff.staff_name, staff.staff_code);
+                                        message += $"{SM} {staff.staff_name} ({staff.staff_code})新增成功。";
+
+                                        db.SaveChanges();
+                                        transaction.Commit();
+                                        TempData["SaveStatus"] = "success";
+                                        TempData["SaveMessage"] = "記錄新增完成";
+                                    }
+                                }
+                                else if (leavingDateYearMonth > smDate && smDatemouth == endmounth && smDateyear == endyear)    // 過試用期 將離職
+                                {
+                                    string leavingDateDay = endDateYearMonth.ToString("dd");
+                                    if (!string.IsNullOrEmpty(leavingDateDay))
+                                    {
+                                        int leavingDay = int.Parse(leavingDateDay);
+                                        //rwfm = stfm - leavingDay;
+                                        var newHrSalary = new hr_salary
+                                        {
+                                            total_salary = (salary_amt2 / stfm) * leavingDay,
+                                            base_salary = salary_amt2,
+                                            dayofwork = leavingDay,
+                                            labinsure_money = salary_lab,
+                                            healthinsure_money = salary_hea,
+                                            labretire_money = salary_tir,
+                                            salary_month = SM,
+                                            //pay_date = hr_staff_salary.search_datestart,//薪水發放日
+                                            staff_id = staff.staff_id,
+                                            staff_name = staff.staff_name,
+                                            staff_code = staff.staff_code,
+                                            //genleave = takeLeaveRecords,
+
+                                            late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                            early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                            late_ot_min = otnorday ?? 0,
+                                            early_lv_ot_min = otnordayleave ?? 0,
+                                            late_holiday_min = otholiday ?? 0,
+                                            early_lv_holiday_min = otholidayleave ?? 0,
+
+                                            officialleave = holidayDataCount,
+                                            personalleave = personalleavedata,
+                                            sickleave = sickleavedata,
+                                            genleave = allleavedata,
+                                            otherleave = otherleavedata,
+
+                                            liability_allowance = staff.staff_liability_allowance,
+                                            efficiency_allowance = staff.staff_efficiency_allowance,
+                                            job_allowance = staff.staff_job_allowance,
+                                            sp_allowance = staff.staff_sp_allowance,
+                                            skill_allowance = staff.staff_skill_allowance,
+                                            other_allowance = staff.staff_other_allowance,
+                                            guide_bonus = staff.staff_guide_bonus,
+                                            work_bonus = staff.staff_work_bonus,
+                                        };
+                                        db.hr_salary.Add(newHrSalary);
+                                        //message += string.Format("{0} {1} ({2})新增成功。<br />", SM, staff.staff_name, staff.staff_code);
+                                        message += $"{SM} {staff.staff_name} ({staff.staff_code})新增成功。";
+
+                                        db.SaveChanges();
+                                        transaction.Commit();
+                                        TempData["SaveStatus"] = "success";
+                                        TempData["SaveMessage"] = "記錄新增完成";
+                                    }
+                                }
+                                else if (leavingDateYearMonth < smDate && smDate < endDateYearMonth) // 過試用期 未離職
+                                {
+                                    var newHrSalary = new hr_salary
+                                    {
+                                        base_salary = salary_amt2,
+                                        labinsure_money = salary_lab2,
+                                        healthinsure_money = salary_hea2,
+                                        labretire_money = salary_tir2,
+                                        salary_month = SM,
+                                        //pay_date = hr_staff_salary.search_datestart,//薪水發放日
+                                        staff_id = staff.staff_id,
+                                        staff_name = staff.staff_name,
+                                        staff_code = staff.staff_code,
+                                        //genleave = takeLeaveRecords,
+                                        total_salary = salary_total2,
+
+                                        late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                        early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                        late_ot_min = otnorday ?? 0,
+                                        early_lv_ot_min = otnordayleave ?? 0,
+                                        late_holiday_min = otholiday ?? 0,
+                                        early_lv_holiday_min = otholidayleave ?? 0,
+
+                                        officialleave = holidayDataCount,
+                                        personalleave = personalleavedata,
+                                        sickleave = sickleavedata,
+                                        genleave = allleavedata,
+                                        otherleave = otherleavedata,
+
+                                        liability_allowance = staff.staff_liability_allowance,
+                                        efficiency_allowance = staff.staff_efficiency_allowance,
+                                        job_allowance = staff.staff_job_allowance,
+                                        sp_allowance = staff.staff_sp_allowance,
+                                        skill_allowance = staff.staff_skill_allowance,
+                                        other_allowance = staff.staff_other_allowance,
+                                        guide_bonus = staff.staff_guide_bonus,
+                                        work_bonus = staff.staff_work_bonus,
+                                    };
+                                    db.hr_salary.Add(newHrSalary);
+                                    //message += string.Format("{0} {1} ({2})新增成功。<br />", SM, staff.staff_name, staff.staff_code);
+                                    message += $"{SM} {staff.staff_name} ({staff.staff_code})新增成功。";
+
+                                    db.SaveChanges();
+                                    transaction.Commit();
+                                    TempData["SaveStatus"] = "success";
+                                    TempData["SaveMessage"] = "記錄新增完成";
+                                }
+
+                                //else if (leavingDateYearMonth == SM)
+                                else if (leavingDateYearMonth > smDate && smDate < endDateYearMonth)    //未過試用期 未離職
+                                {
+                                    var newHrSalary = new hr_salary
+                                    {
+                                        total_salary = salary_total,
+                                        base_salary = salary_amt,
+                                        labinsure_money = salary_lab,
+                                        healthinsure_money = salary_hea,
+                                        labretire_money = salary_tir,
+                                        salary_month = SM,
+                                        //pay_date = hr_staff_salary.search_datestart,//薪水發放日
+                                        staff_id = staff.staff_id,
+                                        staff_name = staff.staff_name,
+                                        staff_code = staff.staff_code,
+                                        //genleave = takeLeaveRecords,
+
+                                        late_nor_min = late_nor_min ?? 0,   //平時上班遲到累計(分)
+                                        early_lv_nor_min = late_holiday_min ?? 0,   //平時上班早退累計(分)
+                                        late_ot_min = otnorday ?? 0,
+                                        early_lv_ot_min = otnordayleave ?? 0,
+                                        late_holiday_min = otholiday ?? 0,
+                                        early_lv_holiday_min = otholidayleave ?? 0,
+
+                                        officialleave = holidayDataCount,
+                                        personalleave = personalleavedata,
+                                        sickleave = sickleavedata,
+                                        genleave = allleavedata,
+                                        otherleave = otherleavedata,
+
+                                        liability_allowance = staff.staff_liability_allowance,
+                                        efficiency_allowance = staff.staff_efficiency_allowance,
+                                        job_allowance = staff.staff_job_allowance,
+                                        sp_allowance = staff.staff_sp_allowance,
+                                        skill_allowance = staff.staff_skill_allowance,
+                                        other_allowance = staff.staff_other_allowance,
+                                        guide_bonus = staff.staff_guide_bonus,
+                                        work_bonus = staff.staff_work_bonus,
+                                    };
+                                    db.hr_salary.Add(newHrSalary);
+                                    //message += string.Format("{0} {1} ({2})新增成功。<br />", SM, staff.staff_name, staff.staff_code);
+                                    message += $"{SM} {staff.staff_name} ({staff.staff_code})新增成功。";
+
+                                    db.SaveChanges();
+                                    transaction.Commit();
+                                    TempData["SaveStatus"] = "success";
+                                    TempData["SaveMessage"] = "記錄新增完成";
+                                }
+                                else
+                                {
+                                    transaction.Commit();
+                                    TempData["SaveStatus"] = "danger";
+                                    TempData["SaveMessage"] = "新增失敗，發生錯誤。";
+                                }
+                            }
+                            else
+                            {
+                                transaction.Commit();
+                                TempData["SaveStatus"] = "warning";
+                                TempData["SaveMessage"] = "新增失敗，資料重複。";
+                            }
+
+
+                        }
+                        catch (Exception ex)
+                        {
+                            transaction.Rollback();
+                            log.Error(ex.StackTrace);
+                            TempData["SaveStatus"] = "danger";
+                            TempData["SaveMessage"] = "新增失敗，發生錯誤。";
+                        }
+                    }
+                }
+            }
+            return RedirectToAction("Index", "hr_salary");
+        }
